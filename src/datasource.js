@@ -21,6 +21,14 @@ define(['angular', 'lodash', 'moment'], function(angular, _, moment) {
       var _this = this
       var sets = _.groupBy(options.targets, 'datasource')
       var querys = _.groupBy(options.targets, 'refId')
+      if (sets.OpenTSDB && sets.CompareQueries) {
+        for(const obj of sets.CompareQueries){
+          if (containSpecial(obj.query)){
+            delete sets.OpenTSDB;
+            break;
+          }
+        }
+      }
       var promises = []
       _.forEach(sets, function(targets, dsName) {
         var opt = angular.copy(options)
@@ -62,109 +70,129 @@ define(['angular', 'lodash', 'moment'], function(angular, _, moment) {
     }
 
     this._compareQuery = function(options, targets, querys, _this) {
-      var comparePromises = []
+      var comparePromises = [],optionsTarget={},queryarr=[];
+      for (let obj of options.targets){
+        if(!optionsTarget[obj.refId]){
+          optionsTarget[obj.refId] = {id:obj.refId, metric:obj.metric}
+        }
+      }
       //console.log('_compareQuery targets', targets)
       _.forEach(targets, function(target) {
         var query = target.query
-        if (query == null || query == '' || querys[query] == null) {
+        if (query == null || query == '') {
           return
         }
-        var queryObj = angular.copy(querys[query][0])
-        queryObj.hide = false
-        if (queryObj) {
-          var comapreDsName = queryObj.datasource
+        let queryObj,metrics=[],metricObj={};
+        if (containSpecial(query)) {
+          //针对compare特殊处理
+          for(const cha of query){
+            metricObj={};
+            if(optionsTarget[cha]){
+              metricObj.id = optionsTarget[cha].id
+              metricObj.metric = optionsTarget[cha].metric
+              metricObj.filter =""
+            }
+            metrics.push(metricObj)
+          }
+          let tags ={};
+          if (querys['A'] != null && querys['A'][0] != null){
+            let obj =querys['A'][0]
+            queryObj = {aggregator: "",
+              currentTagKey: "",
+              currentTagValue: "",
+              datasource: "OpenTSDB",
+              downsampleAggregator: obj.downsampleAggregator,
+              downsampleFillPolicy: "",
+              downsampleInterval: obj.downsampleInterval,
+              hide: false,
+              metric: "expQuery",
+              refId: "",
+              tags:tags,
+              metrics:metrics,
+              query:query,
+              alias:""
+            }
+          }
+          
+          
+        } else {
+          queryObj = angular.copy(querys[query][0])
+          queryObj.hide =false;
+        }    
+          var comapreDsName = queryObj.datasource;
           if (target.timeShifts && target.timeShifts.length > 0) {
             _.forEach(target.timeShifts, function(timeShift) {
-              var timeShiftValue
-              var timeShiftAlias
-
-              var comparePromise = _this.datasourceSrv
-                .get(comapreDsName)
-                .then(function(comapreDs) {
-                  if (comapreDs.meta.id === _this.meta.id) {
-                    return { data: [] }
-                  }
-                  timeShiftValue = _this.templateSrv.replace(
-                    timeShift.value,
-                    options.scopedVars
-                  )
-                  timeShiftAlias = _this.templateSrv.replace(
-                    timeShift.alias,
-                    options.scopedVars
-                  )
-
+              let timeShiftValue;
+              let timeShiftAlias;
+              
+              let comparePromise = _this.datasourceSrv.get(comapreDsName).then(function(comapreDs){
+                if ( comapreDs.meta.id  === _this.meta.id) {
+                  return {data: []}
+                }
+                timeShiftValue = _this.templateSrv.replace(timeShift.value, options.scopedVars);
+                timeShiftAlias = _this.templateSrv.replace(timeShift.alias, options.scopedVars);
+                if (timeShiftValue == null || timeShiftValue == '' || typeof timeShiftValue == 'undefined') {
+                  return {data: []}
+                }
+                
+                let compareOptions = angular.copy(options)
+                compareOptions.range.from = addTimeShift(
+                  compareOptions.range.from, timeShiftValue
+                )
+                compareOptions.range.to = addTimeShift(
+                  compareOptions.range.to, timeShiftValue
+                )
+                compareOptions.range.raw = {
+                  from: compareOptions.range.from,
+                  to: compareOptions.range.to
+                }
+                compareOptions.rangeRaw = compareOptions.range.raw;
+                
+                queryObj.refId = query + '_' + timeShiftValue;
+                compareOptions.targets = [queryObj]
+                compareOptions.requestId = compareOptions.requestId + '_' +timeShiftValue;
+                
+                let compareResult = comapreDs.query(compareOptions);
+                return typeof compareResult.toPromise === 'function'
+                ? compareResult.toPromise()
+                : compareResult
+              }).then(function(compareResult){
+                let data = compareResult.data
+                data.forEach(function(line) {
                   if (
-                    timeShiftValue == null ||
-                    timeShiftValue == '' ||
-                    typeof timeShiftValue == 'undefined'
+                    typeof timeShift.alias == 'undefined' ||
+                    timeShift.alias == null ||
+                    timeShift.alias == ''
                   ) {
-                    return { data: [] }
+                    line.target = line.target + '_' + timeShiftValue
+                    typeof line.title != 'undefined' && line.title != null && (line.title = line.title + '_' + timeShiftValue)
+                  } else {
+                    line.target = line.target + '_' + timeShiftAlias
+                    typeof line.title != 'undefined' && line.title != null && (line.title = line.title + '_' + timeShiftAlias)
                   }
-                  let compareOptions = angular.copy(options)
-                  compareOptions.range.from = addTimeShift(
-                    compareOptions.range.from,
-                    timeShiftValue
-                  )
-                  compareOptions.range.to = addTimeShift(
-                    compareOptions.range.to,
-                    timeShiftValue
-                  )
-                  compareOptions.range.raw = {
-                    from: compareOptions.range.from,
-                    to: compareOptions.range.to
-                  }
-                  compareOptions.rangeRaw = compareOptions.range.raw
 
-                  queryObj.refId = queryObj.refId + '_' + timeShiftValue
-                  compareOptions.targets = [queryObj]
-                  compareOptions.requestId =
-                    compareOptions.requestId + '_' + timeShiftValue
+                  if (target.process) {
+                    let timeShift_ms = parseShiftToMs(timeShiftValue)
 
-                  var compareResult = comapreDs.query(compareOptions)
-                  return typeof compareResult.toPromise === 'function'
-                    ? compareResult.toPromise()
-                    : compareResult
-                })
-                .then(function(compareResult) {
-                  var data = compareResult.data
-                  data.forEach(function(line) {
-                    if (
-                      typeof timeShift.alias == 'undefined' ||
-                      timeShift.alias == null ||
-                      timeShift.alias == ''
-                    ) {
-                      line.target = line.target + '_' + timeShiftValue
-                      typeof line.title != 'undefined' && line.title != null && (line.title = line.title + '_' + timeShiftValue)
+                    if (line.type == 'table') {
+                      if (line.rows) {
+                        line.rows.forEach(function(row) {
+                          row[0] = row[0] + timeShift_ms
+                        })
+                      }
                     } else {
-                      line.target = line.target + '_' + timeShiftAlias
-                      typeof line.title != 'undefined' && line.title != null && (line.title = line.title + '_' + timeShiftAlias)
-                    }
-
-                    if (target.process) {
-                      let timeShift_ms = parseShiftToMs(timeShiftValue)
-
-                      if (line.type == 'table') {
-                        if (line.rows) {
-                          line.rows.forEach(function(row) {
-                            row[0] = row[0] + timeShift_ms
-                          })
-                        }
-                      } else {
-                        if (line.datapoints) {
-                          line.datapoints.forEach(function(datapoint) {
-                            datapoint[1] = datapoint[1] + timeShift_ms
-                          })
-                        }
+                      if (line.datapoints) {
+                        line.datapoints.forEach(function(datapoint) {
+                          datapoint[1] = datapoint[1] + timeShift_ms
+                        })
                       }
                     }
-                    
-                    line.hide = target.hide
-                  })
-                  return {
-                    data: data
                   }
+                  
+                  line.hide = target.hide
                 })
-
+                return {data: data}
+              })
               comparePromises.push(comparePromise)
             })
           }
@@ -192,6 +220,12 @@ define(['angular', 'lodash', 'moment'], function(angular, _, moment) {
         }
       })
     }
+    
+    function containSpecial( s )      
+    {      
+        var containSpecial = RegExp(/(\%)(\*)(\-)(\+)(\\)+/);      
+        return ( containSpecial.test(s) );      
+    } 
     var units = ['y', 'M', 'w', 'd', 'h', 'm', 's']
     function parseShiftToMs(timeShift) {
       let timeShiftObj = parseTimeShift(timeShift)
